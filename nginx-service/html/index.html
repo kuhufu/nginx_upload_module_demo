@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nginx文件上传演示系统 - 支持断点续传</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .endpoint {
+            background: #f8f9fa;
+            padding: 15px;
+            margin: 15px 0;
+            border-left: 4px solid #007bff;
+            border-radius: 4px;
+        }
+        .upload-form {
+            margin: 20px 0;
+            padding: 20px;
+            background: #e8f4fd;
+            border-radius: 8px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input[type="file"], input[type="text"] {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            white-space: pre-wrap;
+        }
+        .progress-container {
+            margin: 15px 0;
+            display: none;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background: #e9ecef;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        .progress-fill {
+            height: 100%;
+            background: #28a745;
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+        .progress-text {
+            text-align: center;
+            margin-top: 5px;
+            font-size: 14px;
+            color: #6c757d;
+        }
+        .upload-controls {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+        .resume-info {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 4px;
+            padding: 10px;
+            margin: 10px 0;
+            display: none;
+        }
+        .feature-badge {
+            background: #17a2b8;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            margin-left: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Nginx文件上传演示系统 <span class="feature-badge">支持断点续传</span></h1>
+        
+        <div class="endpoint">
+            <h3>系统组件</h3>
+            <ul>
+                <li><strong>Nginx反向代理</strong> - 端口80 <span class="feature-badge">upload_module</span></li>
+                <li><strong>认证服务</strong> - 端口8080</li>
+                <li><strong>文件处理服务</strong> - 端口8081</li>
+                <li><strong>演示服务</strong> - 端口8082</li>
+            </ul>
+        </div>
+
+        <div class="endpoint">
+            <h3>可用端点</h3>
+            <ul>
+                <li><strong>GET /</strong> - 当前页面</li>
+                <li><strong>GET /hello</strong> - Hello World消息</li>
+                <li><strong>POST /upload</strong> - 文件上传（需要认证）<span class="feature-badge">断点续传</span></li>
+                <li><strong>GET /health</strong> - 健康检查</li>
+            </ul>
+        </div>
+
+        <div class="upload-form">
+            <h3>文件上传测试 <span class="feature-badge">支持断点续传</span></h3>
+            
+            <div class="resume-info" id="resumeInfo">
+                <strong>断点续传信息:</strong> 
+                <span id="resumeStatus">检测到可恢复的上传</span>
+                <button id="resumeUpload" style="margin-left: 10px; padding: 5px 10px; font-size: 12px;">继续上传</button>
+            </div>
+            
+            <form id="uploadForm">
+                <div class="form-group">
+                    <label for="token">认证Token:</label>
+                    <input type="text" id="token" value="Bearer valid-token" required>
+                </div>
+                <div class="form-group">
+                    <label for="file">选择文件:</label>
+                    <input type="file" id="file" required>
+                </div>
+                <div class="form-group">
+                    <label for="description">文件描述:</label>
+                    <input type="text" id="description" value="测试文件" required>
+                </div>
+                
+                <div class="progress-container" id="progressContainer">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progressFill"></div>
+                    </div>
+                    <div class="progress-text" id="progressText">0%</div>
+                </div>
+                
+                <div class="upload-controls">
+                    <button type="submit" id="uploadBtn">开始上传</button>
+                    <button type="button" id="pauseBtn" disabled>暂停</button>
+                    <button type="button" id="resumeBtn" disabled>继续</button>
+                    <button type="button" id="cancelBtn" disabled>取消</button>
+                </div>
+            </form>
+            <div id="result" class="result" style="display: none;"></div>
+        </div>
+    </div>
+
+    <script>
+        // 全局变量
+        let currentUploadController = null;
+        let currentUploadFile = null;
+        let currentUploadStartByte = 0;
+        let uploadPaused = false;
+        let uploadSessionId = null;
+        let currentUploadToken = null;
+        let currentUploadDescription = null;
+
+        // 获取DOM元素
+        const uploadForm = document.getElementById('uploadForm');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const pauseBtn = document.getElementById('pauseBtn');
+        const resumeBtn = document.getElementById('resumeBtn');
+        const cancelBtn = document.getElementById('cancelBtn');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressFill = document.getElementById('progressFill');
+        const progressText = document.getElementById('progressText');
+        const resultDiv = document.getElementById('result');
+        const resumeInfo = document.getElementById('resumeInfo');
+        const resumeStatus = document.getElementById('resumeStatus');
+        const resumeUploadBtn = document.getElementById('resumeUpload');
+
+        /**
+         * 更新进度条显示
+         * @param {number} percentage - 进度百分比 (0-100)
+         * @param {string} statusText - 状态文本
+         */
+        function updateProgress(percentage, statusText) {
+            progressFill.style.width = percentage + '%';
+            progressText.textContent = statusText || `${Math.round(percentage)}%`;
+        }
+
+        /**
+         * 重置上传状态
+         */
+        function resetUploadState() {
+            currentUploadController = null;
+            currentUploadFile = null;
+            currentUploadStartByte = 0;
+            uploadPaused = false;
+            uploadSessionId = null;
+            currentUploadToken = null;
+            currentUploadDescription = null;
+            
+            updateProgress(0, '准备上传');
+            progressContainer.style.display = 'none';
+            
+            uploadBtn.disabled = false;
+            pauseBtn.disabled = true;
+            resumeBtn.disabled = true;
+            cancelBtn.disabled = true;
+            
+            resumeInfo.style.display = 'none';
+        }
+
+        /**
+         * 开始上传
+         */
+        function startUpload() {
+            const token = document.getElementById('token').value;
+            const fileInput = document.getElementById('file');
+            const description = document.getElementById('description').value;
+            
+            if (!fileInput.files.length) {
+                alert('请选择文件');
+                return;
+            }
+            
+            currentUploadFile = fileInput.files[0];
+            currentUploadStartByte = 0;
+            uploadSessionId = generateSessionId(currentUploadFile);
+            currentUploadToken = token;
+            currentUploadDescription = description;
+            
+            progressContainer.style.display = 'block';
+            uploadBtn.disabled = true;
+            pauseBtn.disabled = false;
+            cancelBtn.disabled = false;
+            
+            performUpload(token, description, 0);
+        }
+
+        /**
+         * 生成会话ID（基于文件名、大小和修改时间）
+         * @param {File} file - 文件对象
+         * @returns {string} - 唯一的会话ID
+         */
+        function generateSessionId(file) {
+            const data = file.name + file.size + file.lastModified;
+            let hash = 0;
+            for (let i = 0; i < data.length; i++) {
+                const char = data.charCodeAt(i);
+                hash = ((hash << 5) - hash) + char;
+                hash = hash & hash; // 转换为32位整数
+            }
+            return 'session_' + Math.abs(hash).toString(36);
+        }
+
+        /**
+         * 执行文件上传（符合nginx upload_module断点续传协议）
+         * @param {string} token - 认证token
+         * @param {string} description - 文件描述
+         * @param {number} startByte - 起始字节位置（用于断点续传）
+         */
+        async function performUpload(token, description, startByte = 0) {
+            if (!currentUploadFile) return;
+            
+            // 更新当前上传位置
+            currentUploadStartByte = startByte;
+            
+            // 创建可取消的fetch请求
+            currentUploadController = new AbortController();
+            
+            // 设置分块大小
+            const chunkSize = 1024 * 1024; // 1MB分块大小
+            
+            try {
+                // 创建文件切片（支持断点续传）
+                const endByte = Math.min(currentUploadStartByte + chunkSize - 1, currentUploadFile.size - 1);
+                const fileSlice = currentUploadFile.slice(currentUploadStartByte, endByte + 1);
+                
+                // 构建符合nginx upload_module断点续传协议的请求头
+                const headers = {
+                    'Authorization': token,
+                    'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(currentUploadFile.name)}`,
+                    'Content-Type': 'application/octet-stream',
+                    'Content-Range': `bytes ${currentUploadStartByte}-${endByte}/${currentUploadFile.size}`,
+                    'Session-ID': uploadSessionId,
+                    'Content-Length': fileSlice.size.toString()
+                };
+                
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    headers: headers,
+                    body: fileSlice,
+                    signal: currentUploadController.signal
+                });
+                
+                // 检查是否需要继续上传
+                if (response.status === 201) {
+                    // 201状态码表示需要继续上传
+                    const rangeHeader = response.headers.get('Range');
+                    if (rangeHeader) {
+                        const match = rangeHeader.match(/bytes=(\d+)-(\d+)/);
+                        if (match) {
+                            currentUploadStartByte = parseInt(match[2]) + 1;
+                            const progress = (currentUploadStartByte / currentUploadFile.size) * 100;
+                            updateProgress(progress, `上传中... ${Math.round(progress)}%`);
+                            
+                            // 继续上传下一个分块
+                            setTimeout(() => performUpload(token, description, currentUploadStartByte), 100);
+                            return;
+                        }
+                    } else {
+                        // 没有Range头，但状态码是201，继续上传下一个分块
+                        currentUploadStartByte = Math.min(currentUploadStartByte + chunkSize, currentUploadFile.size);
+                        const progress = (currentUploadStartByte / currentUploadFile.size) * 100;
+                        updateProgress(progress, `上传中... ${Math.round(progress)}%`);
+                        
+                        // 继续上传下一个分块
+                        setTimeout(() => performUpload(token, description, currentUploadStartByte), 100);
+                        return;
+                    }
+                }
+                
+                // 上传完成
+                let data;
+                try {
+                    data = await response.json();
+                } catch (e) {
+                    data = { success: true, message: '文件上传完成' };
+                }
+                
+                resultDiv.style.display = 'block';
+                resultDiv.textContent = JSON.stringify(data, null, 2);
+                
+                if (response.ok || response.status === 200) {
+                    resultDiv.style.background = '#d4edda';
+                    updateProgress(100, '上传完成');
+                    
+                    // 标记上传已完成，防止继续递归调用
+                    currentUploadStartByte = currentUploadFile.size;
+                    
+                    // 上传完成后重置状态
+                    setTimeout(resetUploadState, 2000);
+                } else {
+                    resultDiv.style.background = '#f8d7da';
+                    updateProgress(0, '上传失败');
+                    resetUploadState();
+                }
+                
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    // 用户取消上传
+                    updateProgress(0, '上传已取消');
+                    resultDiv.style.display = 'block';
+                    resultDiv.textContent = '上传已取消';
+                    resultDiv.style.background = '#f8d7da';
+                } else if (uploadPaused) {
+                    // 上传被暂停
+                    const progress = (currentUploadStartByte / currentUploadFile.size) * 100;
+                    updateProgress(progress, '上传已暂停');
+                    resumeInfo.style.display = 'block';
+                    resumeStatus.textContent = `已上传 ${Math.round(progress)}%，可继续上传`;
+                } else {
+                    // 其他错误
+                    resultDiv.style.display = 'block';
+                    resultDiv.textContent = '上传失败: ' + error.message;
+                    resultDiv.style.background = '#f8d7da';
+                    updateProgress(0, '上传失败');
+                    resetUploadState();
+                }
+            }
+        }
+
+        /**
+         * 暂停上传
+         */
+        function pauseUpload() {
+            if (currentUploadController && !uploadPaused) {
+                uploadPaused = true;
+                currentUploadController.abort();
+                
+                pauseBtn.disabled = true;
+                resumeBtn.disabled = false;
+                
+                updateProgress((currentUploadStartByte / currentUploadFile.size) * 100, '上传已暂停');
+            }
+        }
+
+        /**
+         * 继续上传
+         */
+        function resumeUpload() {
+            if (uploadPaused && currentUploadFile) {
+                uploadPaused = false;
+                
+                pauseBtn.disabled = false;
+                resumeBtn.disabled = true;
+                resumeInfo.style.display = 'none';
+                
+                updateProgress((currentUploadStartByte / currentUploadFile.size) * 100, '继续上传...');
+                performUpload(currentUploadToken, currentUploadDescription, currentUploadStartByte);
+            }
+        }
+
+        /**
+         * 取消上传
+         */
+        function cancelUpload() {
+            if (currentUploadController) {
+                currentUploadController.abort();
+                resetUploadState();
+            }
+        }
+
+        // 事件监听器
+        uploadForm.addEventListener('submit', function(e) {
+            e.preventDefault();
+            startUpload();
+        });
+
+        pauseBtn.addEventListener('click', pauseUpload);
+        resumeBtn.addEventListener('click', resumeUpload);
+        cancelBtn.addEventListener('click', cancelUpload);
+        resumeUploadBtn.addEventListener('click', resumeUpload);
+
+        // 文件选择变化时重置状态
+        document.getElementById('file').addEventListener('change', function() {
+            resetUploadState();
+        });
+
+        // 页面加载时初始化状态
+        document.addEventListener('DOMContentLoaded', function() {
+            resetUploadState();
+        });
+    </script>
+</body>
+</html>

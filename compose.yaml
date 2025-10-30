@@ -1,0 +1,66 @@
+services:
+  # Nginx反向代理服务
+  nginx:
+    build:
+      context: ./nginx-service
+      dockerfile: Dockerfile
+    image: nginx-with-upload-auth
+    container_name: nginx-proxy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./uploads:/var/nginx_uploads
+      - ./logs:/var/log/nginx
+      - ./nginx-service/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx-service/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx-service/html:/usr/share/nginx/html:ro
+    depends_on:
+      - auth-backend
+      - file-backend
+      - demo-service
+    networks:
+      - nginx-network
+
+  # 认证服务
+  auth-backend:
+    build:
+      context: ./auth-service
+      dockerfile: Dockerfile
+    container_name: auth-service
+    networks:
+      - nginx-network
+    environment:
+      - PORT=8080
+
+  # 文件处理服务
+  file-backend:
+    build:
+      context: ./file-service
+      dockerfile: Dockerfile
+    container_name: file-service
+    volumes:
+      - ./uploads:/tmp/uploads
+    networks:
+      - nginx-network
+    environment:
+      - PORT=8081
+
+  # 演示服务
+  demo-service:
+    build:
+      context: ./demo-service
+      dockerfile: Dockerfile
+    container_name: demo-service
+    networks:
+      - nginx-network
+    environment:
+      - PORT=8082
+
+networks:
+  nginx-network:
+    driver: bridge
+
+volumes:
+  uploads:
+    driver: local
