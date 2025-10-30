@@ -16,14 +16,14 @@ services:
       - ./nginx-service/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx-service/html:/usr/share/nginx/html:ro
     depends_on:
-      - auth-backend
-      - file-backend
+      - auth-service
+      - file-service
       - demo-service
     networks:
       - nginx-network
 
   # 认证服务
-  auth-backend:
+  auth-service:
     build:
       context: ./auth-service
       dockerfile: Dockerfile
@@ -34,7 +34,7 @@ services:
       - PORT=8080
 
   # 文件处理服务
-  file-backend:
+  file-service:
     build:
       context: ./file-service
       dockerfile: Dockerfile
