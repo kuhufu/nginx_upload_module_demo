@@ -184,7 +184,14 @@
     </div>
 
     <script>
-        // 全局变量
+        // 上传相关常量
+        const UPLOAD_CONFIG = {
+            CHUNK_SIZE: 1024 * 1024, // 1MB分块大小
+            CONTINUE_DELAY: 100, // 继续上传延迟(ms)
+            COMPLETE_DELAY: 2000 // 完成状态显示延迟(ms)
+        };
+        
+        // 上传状态变量
         let currentUploadController = null;
         let currentUploadFile = null;
         let currentUploadStartByte = 0;
@@ -284,6 +291,116 @@
         }
 
         /**
+         * 构建上传请求头
+         * @param {string} token - 认证token
+         * @param {number} startByte - 起始字节
+         * @param {number} endByte - 结束字节
+         * @param {number} fileSize - 文件大小
+         * @param {number} chunkSize - 分块大小
+         * @returns {Object} 请求头对象
+         */
+        function buildUploadHeaders(token, startByte, endByte, fileSize, chunkSize) {
+            return {
+                'Authorization': token,
+                'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(currentUploadFile.name)}`,
+                'Content-Type': 'application/octet-stream',
+                'Content-Range': `bytes ${startByte}-${endByte}/${fileSize}`,
+                'Session-ID': uploadSessionId,
+                'Content-Length': chunkSize.toString()
+            };
+        }
+
+        /**
+         * 处理201状态码响应（需要继续上传）
+         * @param {Response} response - HTTP响应对象
+         * @param {string} token - 认证token
+         * @param {string} description - 文件描述
+         * @param {number} currentStartByte - 当前起始字节
+         * @param {number} fileSize - 文件大小
+         * @returns {boolean} 是否继续上传
+         */
+        function handleContinueUpload(response, token, description, currentStartByte, fileSize) {
+            const rangeHeader = response.headers.get('Range');
+            
+            if (rangeHeader) {
+                const match = rangeHeader.match(/(\d+)-(\d+)/);
+                console.log(`服务器返回Range头：${rangeHeader}`);
+                console.log(`匹配到的范围：${match}`);
+
+                if (match) {
+                    currentUploadStartByte = parseInt(match[2]) + 1;
+                } else {
+                    currentUploadStartByte = Math.min(currentStartByte + UPLOAD_CONFIG.CHUNK_SIZE, fileSize);
+                }
+            } else {
+                currentUploadStartByte = Math.min(currentStartByte + UPLOAD_CONFIG.CHUNK_SIZE, fileSize);
+            }
+            
+            const progress = (currentUploadStartByte / fileSize) * 100;
+            updateProgress(progress, `上传中... ${Math.round(progress)}%`);
+            
+            console.log(`继续上传下一个分块，起始字节：${currentUploadStartByte}`);
+            setTimeout(() => performUpload(token, description, currentUploadStartByte), UPLOAD_CONFIG.CONTINUE_DELAY);
+            return true;
+        }
+
+        /**
+         * 处理上传完成响应
+         * @param {Response} response - HTTP响应对象
+         */
+        function handleUploadComplete(response) {
+            resultDiv.style.display = 'block';
+            
+            if (response.ok || response.status === 200) {
+                resultDiv.style.background = '#d4edda';
+                updateProgress(100, '上传完成');
+                
+                // 标记上传已完成，防止继续递归调用
+                currentUploadStartByte = currentUploadFile.size;
+                
+                // 上传完成后重置状态
+                setTimeout(resetUploadState, UPLOAD_CONFIG.COMPLETE_DELAY);
+
+                // 把response.body 显示 在 result元素
+                response.json().then(data => {
+                    // 格式化 JSON 数据
+                    resultDiv.textContent = JSON.stringify(data, null, 2);
+                });
+            } else {
+                resultDiv.style.background = '#f8d7da';
+                updateProgress(0, '上传失败');
+                resetUploadState();
+            }
+        }
+
+        /**
+         * 处理上传错误
+         * @param {Error} error - 错误对象
+         */
+        function handleUploadError(error) {
+            if (error.name === 'AbortError') {
+                // 用户取消上传
+                updateProgress(0, '上传已取消');
+                resultDiv.style.display = 'block';
+                resultDiv.textContent = '上传已取消';
+                resultDiv.style.background = '#f8d7da';
+            } else if (uploadPaused) {
+                // 上传被暂停
+                const progress = (currentUploadStartByte / currentUploadFile.size) * 100;
+                updateProgress(progress, '上传已暂停');
+                resumeInfo.style.display = 'block';
+                resumeStatus.textContent = `已上传 ${Math.round(progress)}%，可继续上传`;
+            } else {
+                // 其他错误
+                resultDiv.style.display = 'block';
+                resultDiv.textContent = '上传失败: ' + error.message;
+                resultDiv.style.background = '#f8d7da';
+                updateProgress(0, '上传失败');
+                resetUploadState();
+            }
+        }
+
+        /**
          * 执行文件上传（符合nginx upload_module断点续传协议）
          * @param {string} token - 认证token
          * @param {string} description - 文件描述
@@ -298,24 +415,15 @@
             // 创建可取消的fetch请求
             currentUploadController = new AbortController();
             
-            // 设置分块大小
-            const chunkSize = 1024 * 1024; // 1MB分块大小
-            
             try {
                 // 创建文件切片（支持断点续传）
-                const endByte = Math.min(currentUploadStartByte + chunkSize - 1, currentUploadFile.size - 1);
+                const endByte = Math.min(currentUploadStartByte + UPLOAD_CONFIG.CHUNK_SIZE - 1, currentUploadFile.size - 1);
                 const fileSlice = currentUploadFile.slice(currentUploadStartByte, endByte + 1);
                 
-                // 构建符合nginx upload_module断点续传协议的请求头
-                const headers = {
-                    'Authorization': token,
-                    'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(currentUploadFile.name)}`,
-                    'Content-Type': 'application/octet-stream',
-                    'Content-Range': `bytes ${currentUploadStartByte}-${endByte}/${currentUploadFile.size}`,
-                    'Session-ID': uploadSessionId,
-                    'Content-Length': fileSlice.size.toString()
-                };
+                // 构建请求头
+                const headers = buildUploadHeaders(token, currentUploadStartByte, endByte, currentUploadFile.size, fileSlice.size);
                 
+                // 发送上传请求
                 const response = await fetch('/upload', {
                     method: 'POST',
                     headers: headers,
@@ -326,77 +434,16 @@
                 // 检查是否需要继续上传
                 if (response.status === 201) {
                     // 201状态码表示需要继续上传
-                    const rangeHeader = response.headers.get('Range');
-                    if (rangeHeader) {
-                        const match = rangeHeader.match(/bytes=(\d+)-(\d+)/);
-                        if (match) {
-                            currentUploadStartByte = parseInt(match[2]) + 1;
-                            const progress = (currentUploadStartByte / currentUploadFile.size) * 100;
-                            updateProgress(progress, `上传中... ${Math.round(progress)}%`);
-                            
-                            // 继续上传下一个分块
-                            setTimeout(() => performUpload(token, description, currentUploadStartByte), 100);
-                            return;
-                        }
-                    } else {
-                        // 没有Range头，但状态码是201，继续上传下一个分块
-                        currentUploadStartByte = Math.min(currentUploadStartByte + chunkSize, currentUploadFile.size);
-                        const progress = (currentUploadStartByte / currentUploadFile.size) * 100;
-                        updateProgress(progress, `上传中... ${Math.round(progress)}%`);
-                        
-                        // 继续上传下一个分块
-                        setTimeout(() => performUpload(token, description, currentUploadStartByte), 100);
+                    if (handleContinueUpload(response, token, description, currentUploadStartByte, currentUploadFile.size)) {
                         return;
                     }
                 }
                 
-                // 上传完成
-                let data;
-                try {
-                    data = await response.json();
-                } catch (e) {
-                    data = { success: true, message: '文件上传完成' };
-                }
-                
-                resultDiv.style.display = 'block';
-                resultDiv.textContent = JSON.stringify(data, null, 2);
-                
-                if (response.ok || response.status === 200) {
-                    resultDiv.style.background = '#d4edda';
-                    updateProgress(100, '上传完成');
-                    
-                    // 标记上传已完成，防止继续递归调用
-                    currentUploadStartByte = currentUploadFile.size;
-                    
-                    // 上传完成后重置状态
-                    setTimeout(resetUploadState, 2000);
-                } else {
-                    resultDiv.style.background = '#f8d7da';
-                    updateProgress(0, '上传失败');
-                    resetUploadState();
-                }
+                // 处理上传完成
+                handleUploadComplete(response);
                 
             } catch (error) {
-                if (error.name === 'AbortError') {
-                    // 用户取消上传
-                    updateProgress(0, '上传已取消');
-                    resultDiv.style.display = 'block';
-                    resultDiv.textContent = '上传已取消';
-                    resultDiv.style.background = '#f8d7da';
-                } else if (uploadPaused) {
-                    // 上传被暂停
-                    const progress = (currentUploadStartByte / currentUploadFile.size) * 100;
-                    updateProgress(progress, '上传已暂停');
-                    resumeInfo.style.display = 'block';
-                    resumeStatus.textContent = `已上传 ${Math.round(progress)}%，可继续上传`;
-                } else {
-                    // 其他错误
-                    resultDiv.style.display = 'block';
-                    resultDiv.textContent = '上传失败: ' + error.message;
-                    resultDiv.style.background = '#f8d7da';
-                    updateProgress(0, '上传失败');
-                    resetUploadState();
-                }
+                handleUploadError(error);
             }
         }
 
