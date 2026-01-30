@@ -377,7 +377,12 @@ function showFileItemResult(fileItem, success, message) {
 
     // 先设置内容，但保持隐藏状态
     resultContent.className = `file-item-result-content file-item-result ${success ? 'success' : 'error'}`;
-    resultContent.textContent = message;
+    // 支持HTML内容
+    if (message.includes('<')) {
+        resultContent.innerHTML = message;
+    } else {
+        resultContent.textContent = message;
+    }
     resultContent.style.maxHeight = '0';
     resultContent.style.opacity = '0';
     resultContent.style.padding = '0';
@@ -389,6 +394,16 @@ function showFileItemResult(fileItem, success, message) {
     requestAnimationFrame(() => {
         resultWrapper.style.visibility = 'visible';
         resultWrapper.style.opacity = '1';
+        // 自动展开图片预览
+        const hasPreview = message.includes('upload-result-preview');
+        if (hasPreview) {
+            resultContent.classList.add('expanded');
+            setTimeout(() => {
+                resultContent.style.maxHeight = resultContent.scrollHeight + 'px';
+                resultContent.style.opacity = '1';
+                resultContent.style.padding = '10px';
+            }, 100);
+        }
     });
 }
 
@@ -660,9 +675,47 @@ async function performUpload(fileItem) {
 
             try {
                 const data = await response.json();
-                showFileItemResult(fileItem, true, JSON.stringify(data, null, 2));
+
+                // 如果是图片文件，添加预览
+                let resultHtml = JSON.stringify(data, null, 2);
+                if (fileItem.file.type.startsWith('image/')) {
+                    const imageUrl = URL.createObjectURL(fileItem.file);
+                    resultHtml = `
+<div class="upload-result-preview">
+    <div class="preview-image">
+        <img src="${imageUrl}" alt="${fileItem.file.name}" style="max-width: 100%; max-height: 400px; border-radius: 8px; margin-bottom: 10px;">
+        <div class="preview-info" style="font-size: 12px; color: #666; margin-bottom: 10px;">
+            📁 文件名: ${fileItem.file.name}<br>
+            📏 大小: ${formatFileSize(fileItem.file.size)}<br>
+            🎨 类型: ${fileItem.file.type}
+        </div>
+    </div>
+    <details style="margin-top: 10px;">
+        <summary style="cursor: pointer; color: #134CFF; font-weight: 600;">查看服务器响应</summary>
+        <pre style="margin-top: 10px; padding: 10px; background: #f5f5f5; border-radius: 4px; overflow-x: auto;">${JSON.stringify(data, null, 2)}</pre>
+    </details>
+</div>`;
+                }
+                showFileItemResult(fileItem, true, resultHtml);
             } catch (e) {
-                showFileItemResult(fileItem, true, '上传成功');
+                // 即使解析JSON失败，如果是图片也显示预览
+                if (fileItem.file.type.startsWith('image/')) {
+                    const imageUrl = URL.createObjectURL(fileItem.file);
+                    const previewHtml = `
+<div class="upload-result-preview">
+    <div class="preview-image">
+        <img src="${imageUrl}" alt="${fileItem.file.name}" style="max-width: 100%; max-height: 400px; border-radius: 8px; margin-bottom: 10px;">
+        <div class="preview-info" style="font-size: 12px; color: #666;">
+            📁 文件名: ${fileItem.file.name}<br>
+            📏 大小: ${formatFileSize(fileItem.file.size)}<br>
+            🎨 类型: ${fileItem.file.type}
+        </div>
+    </div>
+</div>`;
+                    showFileItemResult(fileItem, true, previewHtml);
+                } else {
+                    showFileItemResult(fileItem, true, '上传成功');
+                }
             }
             showToast('上传成功', `${fileItem.file.name} 上传完成`, 'success');
         } else {
